@@ -1,0 +1,610 @@
+[
+    {
+        "id": "c0f47e861a94e13c",
+        "type": "tab",
+        "label": "Ligne IHM - Prototype v5 (FINAL)",
+        "disabled": false,
+        "info": "Flux final : Nettoyage auto de l'IHM après validation."
+    },
+    {
+        "id": "544b26c4a832bf87",
+        "type": "inject",
+        "z": "c0f47e861a94e13c",
+        "name": "Auth Odoo (Start)",
+        "props": [
+            {
+                "p": "payload"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": true,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 130,
+        "y": 60,
+        "wires": [
+            [
+                "7a961be1481ef632"
+            ]
+        ]
+    },
+    {
+        "id": "7a961be1481ef632",
+        "type": "function",
+        "z": "c0f47e861a94e13c",
+        "name": "Config & Login",
+        "func": "var url = \"https://edu-icam25-duval1.odoo.com\";\nvar db = \"edu-icam25-duval1\";\nvar username = \"constyl.fotso@2026.icam.fr\";\nvar password = \"Dembaba@10.\";\n\nmsg.url = url + \"/jsonrpc\";\nmsg.headers = { \"Content-Type\": \"application/json\" };\n\nmsg.payload = {\n    \"jsonrpc\": \"2.0\",\n    \"method\": \"call\",\n    \"params\": {\n        \"service\": \"common\",\n        \"method\": \"login\",\n        \"args\": [db, username, password]\n    },\n    \"id\": 1\n};\n\nmsg.odoo_config = { db: db, password: password, url: url };\nreturn msg;",
+        "outputs": 1,
+        "x": 320,
+        "y": 60,
+        "wires": [
+            [
+                "d36db5efffe256b0"
+            ]
+        ]
+    },
+    {
+        "id": "d36db5efffe256b0",
+        "type": "http request",
+        "z": "c0f47e861a94e13c",
+        "name": "POST Login",
+        "method": "POST",
+        "ret": "obj",
+        "paytoqs": "ignore",
+        "url": "",
+        "x": 510,
+        "y": 60,
+        "wires": [
+            [
+                "a407029f56669194"
+            ]
+        ]
+    },
+    {
+        "id": "a407029f56669194",
+        "type": "function",
+        "z": "c0f47e861a94e13c",
+        "name": "Store UID",
+        "func": "if (msg.payload.result) {\n    var uid = msg.payload.result;\n    global.set(\"odoo_uid\", uid);\n    global.set(\"odoo_db\", msg.odoo_config.db);\n    global.set(\"odoo_password\", msg.odoo_config.password);\n    global.set(\"odoo_url\", msg.odoo_config.url);\n    node.status({fill:\"green\", shape:\"dot\", text:\"Connecté UID: \"+uid});\n} else {\n    node.status({fill:\"red\", shape:\"ring\", text:\"Erreur Auth\"});\n}\nreturn msg;",
+        "outputs": 1,
+        "x": 700,
+        "y": 60,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "3296f8be7dae6704",
+        "type": "mqtt in",
+        "z": "c0f47e861a94e13c",
+        "name": "RFID MQTT",
+        "topic": "usine/+/chariot_arrive",
+        "qos": "0",
+        "datatype": "json",
+        "broker": "local_mosquitto_id",
+        "inputs": 0,
+        "x": 110,
+        "y": 160,
+        "wires": [
+            [
+                "a4b60973314f08be"
+            ]
+        ]
+    },
+    {
+        "id": "a4b60973314f08be",
+        "type": "function",
+        "z": "c0f47e861a94e13c",
+        "name": "Sequence & Route",
+        "func": "var topicParts = msg.topic.split('/');\nvar posteStr = topicParts[1]; \nvar tag = msg.payload.tag;\n\nmsg.target_poste = (posteStr === 'poste1') ? 1 : 2;\nmsg.tag_rfid = tag;\n\nif (posteStr === 'poste1') {\n    flow.set(\"last_tag_p1\", tag);\n    return [msg, null]; \n} else if (posteStr === 'poste2') {\n    var expectedTag = flow.get(\"last_tag_p1\");\n    if (tag === expectedTag) {\n        return [msg, null];\n    } else {\n        var errorMsg = {\n            payload: {\n                type: \"ERREUR_SEQUENCE\",\n                poste: 2, \n                message: \"Mauvais chariot ! Attendu: \" + (expectedTag || \"Inconnu\")\n            }\n        };\n        return [null, errorMsg];\n    }\n}\nreturn null;",
+        "outputs": 2,
+        "x": 350,
+        "y": 160,
+        "wires": [
+            [
+                "748b17db71c8b9d9"
+            ],
+            [
+                "81730f2caba5bfb9"
+            ]
+        ]
+    },
+    {
+        "id": "748b17db71c8b9d9",
+        "type": "function",
+        "z": "c0f47e861a94e13c",
+        "name": "Search Odoo",
+        "func": "var uid = global.get(\"odoo_uid\");\nvar db = global.get(\"odoo_db\");\nvar password = global.get(\"odoo_password\");\nvar url = global.get(\"odoo_url\");\n\nif (!uid) return null;\n\n// 1. Logique d'état adaptative\nvar allowed_states = [\"confirmed\", \"progress\"];\nif (msg.target_poste === 2) {\n    // Le Poste 1 a déjà validé l'OF, il est donc probablement \"done\" ou \"to_close\"\n    allowed_states = [\"confirmed\", \"progress\", \"done\", \"to_close\"];\n}\n\nmsg.url = url + \"/jsonrpc\";\nmsg.payload = {\n    jsonrpc: \"2.0\",\n    method: \"call\",\n    params: {\n        service: \"object\",\n        method: \"execute_kw\",\n        args: [\n            db, uid, password,\n            \"mrp.production\",\n            \"search_read\",\n            [[[\"x_rfid_tag\", \"=\", msg.tag_rfid], [\"state\", \"in\", allowed_states]]],\n            { \n                fields: [\"id\", \"name\", \"product_id\", \"qty_producing\", \"state\"], \n                limit: 1, \n                order: \"id desc\" // CRUCIAL : Prendre le plus récent si plusieurs OF ont le même tag\n            }\n        ]\n    },\n    id: 2\n};\nreturn msg;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 550,
+        "y": 140,
+        "wires": [
+            [
+                "51978b785cbdb955"
+            ]
+        ]
+    },
+    {
+        "id": "51978b785cbdb955",
+        "type": "http request",
+        "z": "c0f47e861a94e13c",
+        "name": "POST Search",
+        "method": "POST",
+        "ret": "obj",
+        "paytoqs": "ignore",
+        "url": "",
+        "x": 730,
+        "y": 140,
+        "wires": [
+            [
+                "5fadb5d0b3b5b002"
+            ]
+        ]
+    },
+    {
+        "id": "5fadb5d0b3b5b002",
+        "type": "function",
+        "z": "c0f47e861a94e13c",
+        "name": "Map Instruction",
+        "func": "var res = msg.payload.result;\nif (!res || res.length === 0) return null;\n\nvar ofData = res[0];\nvar productName = ofData.product_id[1];\n\nif (msg.target_poste === 1) flow.set(\"current_of_id_p1\", ofData.id);\nif (msg.target_poste === 2) flow.set(\"current_of_id_p2\", ofData.id);\n\nconst variants = {\n    \"Chariot 1\": { p1: [\"Barquette Oui\", \"Cadre Oui\", \"Supports Pied Fixe\"], p2: [\"Roue Grise (x2)\", \"Roue Rouge (x2)\"] }\n    // ... (autres chariots idems)\n};\n\nvar config = variants[productName] || variants[\"Chariot 1\"];\nvar specificSteps = (msg.target_poste === 1) ? config.p1 : config.p2;\n\nmsg.payload = {\n    type: \"NOUVEAU_CHARIOT\",\n    poste: msg.target_poste,\n    tag: msg.tag_rfid,\n    instructions: {\n        of: ofData.name,\n        variante: productName,\n        etapes: specificSteps,\n        temps_alloue: 15\n    }\n};\nreturn msg;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 930,
+        "y": 140,
+        "wires": [
+            [
+                "81730f2caba5bfb9"
+            ]
+        ]
+    },
+    {
+        "id": "833e8a5df9165cb0",
+        "type": "websocket in",
+        "z": "c0f47e861a94e13c",
+        "name": "Valider Flutter",
+        "server": "ws_server_id",
+        "x": 110,
+        "y": 280,
+        "wires": [
+            [
+                "ace4d3c3ad42dee0"
+            ]
+        ]
+    },
+    {
+        "id": "ace4d3c3ad42dee0",
+        "type": "function",
+        "z": "c0f47e861a94e13c",
+        "name": "Update Odoo Production",
+        "func": "var data = JSON.parse(msg.payload);\nif (data.type !== \"VALIDATION\") return null;\n\nvar uid = global.get(\"odoo_uid\");\nvar db = global.get(\"odoo_db\");\nvar password = global.get(\"odoo_password\");\nvar url = global.get(\"odoo_url\");\n\n// On récupère l'ID Odoo mis en mémoire lors du scan\nvar ofId = (data.poste === 1) ? flow.get(\"current_of_id_p1\") : flow.get(\"current_of_id_p2\");\n\nif (!uid || !ofId) return null;\n\nmsg.poste_source = data.poste;\nmsg.url = url + \"/jsonrpc\";\nmsg.payload = {\n    jsonrpc: \"2.0\",\n    method: \"call\",\n    params: {\n        service: \"object\",\n        method: \"execute_kw\",\n        args: [db, uid, password, \"mrp.production\", \"write\", [[ofId], {\"qty_producing\": 1}]]\n    },\n    id: 5\n};\nreturn msg;",
+        "outputs": 1,
+        "x": 350,
+        "y": 280,
+        "wires": [
+            [
+                "a2f69af894473c27"
+            ]
+        ]
+    },
+    {
+        "id": "a2f69af894473c27",
+        "type": "http request",
+        "z": "c0f47e861a94e13c",
+        "name": "POST Update",
+        "method": "POST",
+        "ret": "obj",
+        "paytoqs": "ignore",
+        "url": "",
+        "x": 570,
+        "y": 280,
+        "wires": [
+            [
+                "bd894db0d0fb13fc"
+            ]
+        ]
+    },
+    {
+        "id": "bd894db0d0fb13fc",
+        "type": "function",
+        "z": "c0f47e861a94e13c",
+        "name": "Clear Station IHM",
+        "func": "// Si l'update Odoo est OK, on demande à Flutter de vider l'écran\nif (msg.payload.result) {\n    var clearMsg = {\n        payload: {\n            type: \"CHANGEMENT_POSTE\",\n            poste_source: msg.poste_source\n        }\n    };\n    \n    // On vide aussi les IDs en mémoire flow\n    if (msg.poste_source === 1) flow.set(\"current_of_id_p1\", null);\n    if (msg.poste_source === 2) flow.set(\"current_of_id_p2\", null);\n    \n    // Mise à jour du Dashboard de supervision\n    var dashboardMsg = {\n        payload: \"En attente...\",\n        color: \"#6c757d\" // Gris\n    };\n    if (msg.poste_source === 1) {\n        node.send([null, dashboardMsg, null]); // Sortie 2 pour le UI\n    } else if (msg.poste_source === 2) {\n        node.send([null, null, dashboardMsg]); // Sortie 3 pour le UI\n    }\n    \n    return clearMsg;\n}\nreturn null;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 770,
+        "y": 280,
+        "wires": [
+            [
+                "81730f2caba5bfb9",
+                "ui_text_p1",
+                "ui_text_p2"
+            ]
+        ]
+    },
+    {
+        "id": "c79b9f12993cff42",
+        "type": "mqtt in",
+        "z": "c0f47e861a94e13c",
+        "name": "Auto-Val P2 Trigger",
+        "topic": "usine/poste1/chariot_depart",
+        "qos": "0",
+        "datatype": "json",
+        "broker": "local_mosquitto_id",
+        "inputs": 0,
+        "x": 120,
+        "y": 360,
+        "wires": [
+            [
+                "d78ba614d17744fb"
+            ]
+        ]
+    },
+    {
+        "id": "d78ba614d17744fb",
+        "type": "function",
+        "z": "c0f47e861a94e13c",
+        "name": "Auto-Val Logic",
+        "func": "var ofId = flow.get(\"current_of_id_p1\");\nif (!ofId) return null;\n\nvar uid = global.get(\"odoo_uid\");\nvar db = global.get(\"odoo_db\");\nvar password = global.get(\"odoo_password\");\nvar url = global.get(\"odoo_url\");\n\nmsg.poste_source = 1;\nmsg.url = url + \"/jsonrpc\";\nmsg.payload = {\n    jsonrpc: \"2.0\",\n    method: \"call\",\n    params: {\n        service: \"object\",\n        method: \"execute_kw\",\n        args: [db, uid, password, \"mrp.production\", \"write\", [[ofId], {\"qty_producing\": 1}]]\n    },\n    id: 5\n};\nreturn msg;",
+        "outputs": 1,
+        "x": 340,
+        "y": 360,
+        "wires": [
+            [
+                "a2f69af894473c27"
+            ]
+        ]
+    },
+    {
+        "id": "547c2d04412bff5e",
+        "type": "mqtt in",
+        "z": "c0f47e861a94e13c",
+        "name": "Andon HW",
+        "topic": "usine/poste2/andon",
+        "qos": "0",
+        "datatype": "json",
+        "broker": "local_mosquitto_id",
+        "inputs": 0,
+        "x": 100,
+        "y": 420,
+        "wires": [
+            [
+                "1b4fb544845ef71d"
+            ]
+        ]
+    },
+    {
+        "id": "1b4fb544845ef71d",
+        "type": "function",
+        "z": "c0f47e861a94e13c",
+        "name": "Alerte P2",
+        "func": "msg.payload = {\n    type: \"ALERTE_ANDON\",\n    poste: 2,\n    message: \"Alerte physique activée au Poste 2 !\"\n};\nreturn msg;",
+        "outputs": 1,
+        "x": 300,
+        "y": 420,
+        "wires": [
+            [
+                "81730f2caba5bfb9"
+            ]
+        ]
+    },
+    {
+        "id": "81730f2caba5bfb9",
+        "type": "websocket out",
+        "z": "c0f47e861a94e13c",
+        "name": "To Flutter",
+        "server": "ws_server_id",
+        "x": 1020,
+        "y": 280,
+        "wires": []
+    },
+    {
+        "id": "mqtt_listen_p1",
+        "type": "mqtt in",
+        "z": "c0f47e861a94e13c",
+        "name": "Écoute Poste 1",
+        "topic": "usine/poste1/chariot_arrive",
+        "qos": "0",
+        "datatype": "json",
+        "broker": "local_mosquitto_id",
+        "inputs": 0,
+        "x": 110,
+        "y": 540,
+        "wires": [
+            [
+                "format_p1_ui"
+            ]
+        ]
+    },
+    {
+        "id": "mqtt_listen_p2",
+        "type": "mqtt in",
+        "z": "c0f47e861a94e13c",
+        "name": "Écoute Poste 2",
+        "topic": "usine/poste2/chariot_arrive",
+        "qos": "0",
+        "datatype": "json",
+        "broker": "local_mosquitto_id",
+        "inputs": 0,
+        "x": 110,
+        "y": 600,
+        "wires": [
+            [
+                "format_p2_ui"
+            ]
+        ]
+    },
+    {
+        "id": "format_p1_ui",
+        "type": "function",
+        "z": "c0f47e861a94e13c",
+        "name": "Format UI P1",
+        "func": "msg.payload = \"Actif - Chariot ID: \" + msg.payload.tag;\nmsg.color = \"#28a745\"; // Vert\nreturn msg;",
+        "outputs": 1,
+        "x": 310,
+        "y": 540,
+        "wires": [
+            [
+                "ui_text_p1"
+            ]
+        ]
+    },
+    {
+        "id": "format_p2_ui",
+        "type": "function",
+        "z": "c0f47e861a94e13c",
+        "name": "Format UI P2",
+        "func": "msg.payload = \"Actif - Chariot ID: \" + msg.payload.tag;\nmsg.color = \"#28a745\"; \nreturn msg;",
+        "outputs": 1,
+        "x": 310,
+        "y": 600,
+        "wires": [
+            [
+                "ui_text_p2"
+            ]
+        ]
+    },
+    {
+        "id": "ui_text_p1",
+        "type": "ui_text",
+        "z": "c0f47e861a94e13c",
+        "group": "ui_group_postes",
+        "order": 1,
+        "width": "6",
+        "height": "2",
+        "name": "IHM Poste 1",
+        "label": "Poste 1 :",
+        "format": "<font color=\"{{msg.color}}\"><b>{{msg.payload}}</b></font>",
+        "layout": "row-spread",
+        "className": "",
+        "style": true,
+        "font": "",
+        "fontSize": "",
+        "color": "#000000",
+        "x": 510,
+        "y": 540,
+        "wires": []
+    },
+    {
+        "id": "ui_text_p2",
+        "type": "ui_text",
+        "z": "c0f47e861a94e13c",
+        "group": "ui_group_postes",
+        "order": 2,
+        "width": "6",
+        "height": "2",
+        "name": "IHM Poste 2",
+        "label": "Poste 2 :",
+        "format": "<font color=\"{{msg.color}}\"><b>{{msg.payload}}</b></font>",
+        "layout": "row-spread",
+        "className": "",
+        "style": false,
+        "font": "",
+        "fontSize": "",
+        "color": "#000000",
+        "x": 510,
+        "y": 600,
+        "wires": []
+    },
+    {
+        "id": "mqtt_listen_andon",
+        "type": "mqtt in",
+        "z": "c0f47e861a94e13c",
+        "name": "Écoute Andon",
+        "topic": "usine/poste2/andon",
+        "qos": "0",
+        "datatype": "json",
+        "broker": "local_mosquitto_id",
+        "inputs": 0,
+        "x": 110,
+        "y": 680,
+        "wires": [
+            [
+                "format_andon_ui"
+            ]
+        ]
+    },
+    {
+        "id": "format_andon_ui",
+        "type": "function",
+        "z": "c0f47e861a94e13c",
+        "name": "Déclenchement Andon",
+        "func": "msg.payload = \"ALERTE PRODUCTION ! (Intervention requise au Poste 2)\";\nmsg.color = \"white\";\nmsg.background = \"red\";\nreturn msg;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 340,
+        "y": 680,
+        "wires": [
+            [
+                "ui_text_andon",
+                "ui_audio_alert"
+            ]
+        ]
+    },
+    {
+        "id": "ui_text_andon",
+        "type": "ui_text",
+        "z": "c0f47e861a94e13c",
+        "group": "ui_group_andon",
+        "order": 1,
+        "width": "6",
+        "height": "2",
+        "name": "Statut Andon",
+        "label": "Statut Ligne :",
+        "format": "<div style=\"background-color:{{msg.background}}; color:{{msg.color}}; padding:10px; border-radius:5px; text-align:center;\"><b>{{msg.payload}}</b></div>",
+        "layout": "row-spread",
+        "className": "",
+        "style": false,
+        "font": "",
+        "fontSize": "",
+        "color": "#000000",
+        "x": 600,
+        "y": 680,
+        "wires": []
+    },
+    {
+        "id": "ui_audio_alert",
+        "type": "ui_audio",
+        "z": "c0f47e861a94e13c",
+        "name": "Sirène Andon",
+        "group": "ui_group_andon",
+        "voice": "0",
+        "always": true,
+        "x": 550,
+        "y": 740,
+        "wires": []
+    },
+    {
+        "id": "btn_reset_andon",
+        "type": "ui_button",
+        "z": "c0f47e861a94e13c",
+        "name": "Acquitter Alerte",
+        "group": "ui_group_andon",
+        "order": 2,
+        "width": "0",
+        "height": "0",
+        "passthru": false,
+        "label": "Acquitter l'alerte",
+        "tooltip": "",
+        "color": "white",
+        "bgcolor": "#007bff",
+        "className": "",
+        "icon": "check",
+        "payload": "Ligne en fonctionnement normal.",
+        "payloadType": "str",
+        "topic": "topic",
+        "topicType": "msg",
+        "x": 120,
+        "y": 740,
+        "wires": [
+            [
+                "reset_andon_ui"
+            ]
+        ]
+    },
+    {
+        "id": "reset_andon_ui",
+        "type": "function",
+        "z": "c0f47e861a94e13c",
+        "name": "Reset UI",
+        "func": "msg.color = \"black\";\nmsg.background = \"#e2e3e5\"; // Gris clair\nreturn msg;",
+        "outputs": 1,
+        "x": 300,
+        "y": 740,
+        "wires": [
+            [
+                "ui_text_andon"
+            ]
+        ]
+    },
+    {
+        "id": "local_mosquitto_id",
+        "type": "mqtt-broker",
+        "name": "Local Mosquitto",
+        "broker": "localhost",
+        "port": "1883",
+        "clientid": "nodered-odoo",
+        "autoConnect": true,
+        "usetls": false,
+        "protocolVersion": 4,
+        "keepalive": "60",
+        "cleansession": true,
+        "autoUnsubscribe": true,
+        "birthTopic": "",
+        "birthQos": "0",
+        "birthPayload": "",
+        "birthMsg": {},
+        "closeTopic": "",
+        "closeQos": "0",
+        "closePayload": "",
+        "closeMsg": {},
+        "willTopic": "",
+        "willQos": "0",
+        "willPayload": "",
+        "willMsg": {},
+        "userProps": "",
+        "sessionExpiry": ""
+    },
+    {
+        "id": "ws_server_id",
+        "type": "websocket-listener",
+        "path": "/ws",
+        "wholemsg": "false"
+    },
+    {
+        "id": "ui_group_postes",
+        "type": "ui_group",
+        "name": "État des Postes (Temps Réel)",
+        "tab": "ui_tab_usine",
+        "order": 1,
+        "disp": true,
+        "width": "6",
+        "collapse": false
+    },
+    {
+        "id": "ui_group_andon",
+        "type": "ui_group",
+        "name": "Système ANDON",
+        "tab": "ui_tab_usine",
+        "order": 2,
+        "disp": true,
+        "width": "6",
+        "collapse": false
+    },
+    {
+        "id": "ui_tab_usine",
+        "type": "ui_tab",
+        "name": "Supervision Ligne 5.0",
+        "icon": "dashboard",
+        "order": 1,
+        "disabled": false,
+        "hidden": false
+    },
+    {
+        "id": "eb21b97ddf43c8fa",
+        "type": "global-config",
+        "env": [],
+        "modules": {
+            "node-red-dashboard": "3.6.6"
+        }
+    }
+]
